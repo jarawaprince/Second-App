@@ -1,5 +1,5 @@
 # app.py
-# A super simple weather checker (no API key needed) using Open-Meteo
+# Simple Weather Checker with dynamic background based on temperature
 
 import requests
 import pandas as pd
@@ -8,9 +8,9 @@ import streamlit as st
 st.set_page_config(page_title="WeatherCheckerPro — Simple Weather", page_icon="⛅")
 
 st.title("⛅ WeatherCheckerPro — Simple City Weather")
-st.caption("Type a city name and get current weather + the next 24 hours (free, no API key).")
+st.caption("Type a city name and get current weather + 24-hour forecast. Background changes with temperature!")
 
-# --- Small helper: map Open-Meteo weather codes to text -----------------------
+# --- Weather code descriptions ------------------------------------------------
 WEATHERCODE_TEXT = {
     0: "Clear",
     1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
@@ -31,7 +31,7 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
 @st.cache_data(show_spinner=False, ttl=600)
 def geocode_city(name: str):
-    """Find the first matching city (lat/lon). Returns dict or None."""
+    """Find city coordinates (lat/lon)."""
     try:
         r = requests.get(GEOCODE_URL, params={"name": name, "count": 1, "language": "en"}, timeout=10)
         r.raise_for_status()
@@ -51,16 +51,13 @@ def geocode_city(name: str):
 
 @st.cache_data(show_spinner=False, ttl=300)
 def fetch_weather(lat: float, lon: float):
-    """
-    Get current weather + hourly for next days.
-    We use `current_weather=true` (simple & reliable) and a few hourly vars.
-    """
+    """Get current weather + hourly data."""
     params = {
         "latitude": lat,
         "longitude": lon,
         "current_weather": "true",
         "hourly": "temperature_2m,precipitation_probability,weathercode",
-        "timezone": "auto",  # times come already in the local timezone of the location
+        "timezone": "auto",
     }
     try:
         r = requests.get(FORECAST_URL, params=params, timeout=10)
@@ -69,9 +66,9 @@ def fetch_weather(lat: float, lon: float):
     except requests.RequestException:
         return None
 
-# ----------------------------- UI --------------------------------------------
+# --- Choose city form ----------------------------------------------------------
 with st.form("city_form"):
-    city_input = st.text_input("City name", value="Sydney", help="Try: Melbourne, Brisbane, New York, London, Tokyo…")
+    city_input = st.text_input("City name", value="Sydney", help="Try Melbourne, Brisbane, London, Tokyo, etc.")
     submitted = st.form_submit_button("Get weather")
 
 if submitted:
@@ -83,20 +80,19 @@ if submitted:
         place = geocode_city(city_input.strip())
 
     if not place:
-        st.error("Sorry, I couldn't find that city. Try a different spelling (e.g., 'Sydney, AU').")
+        st.error("Sorry, I couldn't find that city. Try again.")
         st.stop()
 
-    st.success(f"Found: **{place['name']}**, {place.get('admin1') or ''} {place['country']}  "
-               f"({place['lat']:.2f}, {place['lon']:.2f})")
+    st.success(f"Found: **{place['name']}**, {place.get('admin1') or ''} {place['country']}")
 
     with st.spinner("Fetching weather…"):
         data = fetch_weather(place["lat"], place["lon"])
 
     if not data:
-        st.error("Could not fetch weather data. Please try again.")
+        st.error("Could not fetch weather data. Try again.")
         st.stop()
 
-    # --------- Current weather block -----------------------------------------
+    # --- Current weather -------------------------------------------------------
     cw = data.get("current_weather") or {}
     temp_now = cw.get("temperature")
     windspeed = cw.get("windspeed")
@@ -104,6 +100,60 @@ if submitted:
     code = cw.get("weathercode")
     desc = WEATHERCODE_TEXT.get(code, "N/A")
 
+    # ✅ Dynamic background color
+    if temp_now is not None:
+        if temp_now < 10:
+            bg_color = "#b3daff"   # Cold = light blue
+        elif temp_now < 25:
+            bg_color = "#d4f1c5"   # Mild = light green
+        else:
+            bg_color = "#ffb3b3"   # Hot = light red
+    else:
+        bg_color = "#ffffff"       # Default white
+
+    # Inject CSS dynamically
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background-color: {bg_color};
+            transition: background-color 0.8s ease;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
     st.subheader("Current weather")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Temperature (°C)", f"{temp_now if temp_now is not None else '—'}")
+    c2.metric("Wind (km/h)", f"{windspeed if windspeed is not None else '—'}")
+    c3.metric("Wind dir (°)", f"{winddir if winddir is not None else '—'}")
+    c4.metric("Sky", desc)
+
+    # --- Next 24 hours chart ---------------------------------------------------
+    st.subheader("Next 24 hours")
+    hourly = data.get("hourly", {})
+    times = hourly.get("time", [])
+    temps = hourly.get("temperature_2m", [])
+    pops = hourly.get("precipitation_probability")
+
+    df = pd.DataFrame({"time": pd.to_datetime(times), "temperature_2m": temps})
+    if pops is not None:
+        df["precipitation_probability"] = pops
+    df_24 = df.head(24).copy()
+
+    st.line_chart(df_24.set_index("time")["temperature_2m"], height=220)
+
+    nice_table = df_24.copy()
+    nice_table["time"] = nice_table["time"].dt.strftime("%Y-%m-%d %H:%M")
+    if "precipitation_probability" not in nice_table.columns:
+        nice_table["precipitation_probability"] = None
+    nice_table.rename(columns={
+        "time": "Local time",
+        "temperature_2m": "Temp (°C)",
+        "precipitation_probability": "Rain chance (%)"
+    }, inplace=True)
+    st.dataframe(nice_table, use_container_width=True)
+
+    st.caption("Data source: Open-Meteo (free). Background changes with temperature 🌡️")
